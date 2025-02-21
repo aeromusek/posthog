@@ -1,11 +1,18 @@
 use crate::{
-    api::v1::constants::*,
+    api::v1::constants::{
+        extract_aliases,
+        POSTHOG_EVENT_PROPERTY_TABLE_NAME_ALIAS,
+        EVENTS_HIDDEN_PROPERTY_DEFINITIONS,
+        // TODO ELI
+    },
     //metrics_consts::{},
     config::Config,
 };
 
 use serde::Serialize;
 use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, QueryBuilder};
+
+use std::collections::HashMap;
 
 // Wraps Postgres client and builds queries
 pub struct Manager {
@@ -14,6 +21,7 @@ pub struct Manager {
     enterprise_prop_defs_table: String,
     prop_defs_table: String,
     event_props_table: String,
+    search_term_aliases: HashMap<&'static str, &'static str>,
 }
 
 impl Manager {
@@ -26,6 +34,7 @@ impl Manager {
             enterprise_prop_defs_table: cfg.enterprise_prop_defs_table_name.clone(),
             prop_defs_table: cfg.prop_defs_table_name.clone(),
             event_props_table: cfg.event_props_table_name.clone(),
+            search_term_aliases: extract_aliases(),
         })
     }
 
@@ -167,18 +176,45 @@ impl Manager {
             );
         }
 
-        // conditionally apply search term matching
+        // conditionally apply search term matching; skip this if possible, it's not cheap!
         // logic: https://github.com/PostHog/posthog/blob/master/posthog/taxonomy/property_definition_api.py#L493-L499
-        // helpers logic:
-        // https://github.com/PostHog/posthog/blob/master/posthog/taxonomy/property_definition_api.py#L308-L323
-        // https://github.com/PostHog/posthog/blob/master/posthog/taxonomy/property_definition_api.py#L326-L339
-        //
-        // https://github.com/PostHog/posthog/blob/master/posthog/filters.py#L61-L84
+        if search.as_ref().is_some_and(|terms| terms.len() > 0) {
+            // step 1: prep list of legal search fields (default: just property "name")
+            let mut search_fields = vec!["name"];
 
-        /* **** TODO: implement! ****
-           let search_extras = HashMap::<String, String>::new();
-           **************************
-        */
+            // step 2: identify property def "aliases" to enrich our fuzzy matching; see also:
+            // https://github.com/PostHog/posthog/blob/master/posthog/taxonomy/property_definition_api.py#L309-L324
+
+            // attempt to enrich basic search terms using a heuristic:
+            // if the long slug associated with any std PostHog event properties
+            // matches *every search term* in the incoming query, capture the
+            // associated property name and add it to the search terms we'll
+            // attempt to return from the prop defs query. This is expensive :(
+            let term_aliases: Vec<&str> = self.search_term_aliases
+                .iter()
+                .filter(|(key, prop_long_slug)|
+                    search
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .all(|term| prop_long_slug.contains(term)))
+                .map(|(key, _matched_slug)| *key)
+                .collect();
+
+            // build a query fragment if we found some aliases. it is OK to
+            // do this "directly" because these are not user-sourced inputs
+            let search_extras = if term_aliases.len() > 0 {
+                format!(" OR name = ANY(ARRAY[{}])", term_aliases.join(", "))
+            } else { "".to_string() };
+
+            // step 3: filter "initial" prop defs if the user wants "latest"
+            // https://github.com/PostHog/posthog/blob/master/posthog/taxonomy/property_definition_api.py#L326-L339
+            // TODO(eli): IMPLEMENT!
+
+            // step 4: generate the search SQL
+            // https://github.com/PostHog/posthog/blob/master/posthog/filters.py#L61-L84
+            // TODO(eli): IMPLEMENT!
+        }
 
         // conditionally apply event_names filter for outer query
         //
